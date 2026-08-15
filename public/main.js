@@ -23,6 +23,12 @@ const { createServer } = require('http')
 const { Server } = require('socket.io');
 const { Simulate } = require('react-dom/test-utils');
 
+// PIN required before a viewer can request/control the stream.
+// Set your own PIN via an environment variable rather than hardcoding it -
+// e.g. in PowerShell: $env:REMOTE_PIN = "your-secret-pin"; yarn start
+// Falls back to a default if not set, so make sure to actually set your own.
+const PIN = process.env.REMOTE_PIN || 'changeme123'
+
 expressApp.use(express.static(__dirname));
 
 //Middleware
@@ -66,28 +72,56 @@ const connections = io.of('/remote-ctrl')
 connections.on('connection', socket => {
     debugLog('connection established')
 
+    // The Electron host authenticates itself automatically - it's already
+    // running locally on the machine being controlled, so there's nothing
+    // to gate. Only remote viewers need to prove they know the PIN.
+    let authenticated = false
+
+    socket.on('auth', (pin) => {
+        if (pin === PIN) {
+            authenticated = true
+            socket.emit('auth-result', { ok: true })
+            debugLog('client authenticated')
+        } else {
+            socket.emit('auth-result', { ok: false })
+            debugLog('auth failed - wrong pin')
+        }
+    })
+
+    // Electron's own App.js instance calls this immediately on load so the
+    // host doesn't have to type a PIN into itself.
+    socket.on('host-auth', () => {
+        authenticated = true
+        debugLog('host self-authenticated')
+    })
+
     socket.on('viewer-ready', () => {
+        if (!authenticated) return
         debugLog('viewer ready, forwarding to host')
         socket.broadcast.emit('viewer-ready')
     })
 
     socket.on('offer', sdp => {
+        if (!authenticated) return
         debugLog('routing offer')
         // send to the electron app
         socket.broadcast.emit('offer', sdp)
     })
 
     socket.on('answer', sdp => {
+        if (!authenticated) return
         debugLog('routing answer')
         // send to the electron app
         socket.broadcast.emit('answer', sdp)
     })
 
     socket.on('icecandidate', icecandidate => {
+        if (!authenticated) return
         socket.broadcast.emit('icecandidate', icecandidate)
     })
 
     socket.on('selectedScreen', selectedScreen => {
+        if (!authenticated) return
         clientSelectedScreen = selectedScreen
 
         socket.broadcast.emit('selectedScreen', clientSelectedScreen)
@@ -99,6 +133,7 @@ connections.on('connection', socket => {
     let isDragging = false;
 
     socket.on('mouse_down', ({ button }) => {
+        if (!authenticated) return
         //console.log(button)
         if (button == 0) { isDragging = true; robot.mouseToggle("down", "left"); } else
             if (button == 1) robot.mouseToggle("down", "middle"); else
@@ -108,6 +143,7 @@ connections.on('connection', socket => {
     });
 
     socket.on('mouse_up', ({ button }) => {
+        if (!authenticated) return
         //console.log(button)
         if (button == 0) { isDragging = false; robot.mouseToggle("up", "left"); } else
             if (button == 1) robot.mouseToggle("up", "middle"); else
@@ -141,6 +177,7 @@ connections.on('connection', socket => {
     socket.on('mouse_move', ({
         clientX, clientY, clientWidth, clientHeight,
     }) => {
+        if (!authenticated) return
         try {
             if (!clientSelectedScreen || !clientSelectedScreen.displaySize) {
                 throw new Error('clientSelectedScreen or its displaySize is undefined');
@@ -167,6 +204,7 @@ connections.on('connection', socket => {
 
 
     socket.on('scrolling', ({ scroll }) => {
+        if (!authenticated) return
         //console.log(scroll);
         const [deltaY, deltaX] = scroll;
 
@@ -176,6 +214,7 @@ connections.on('connection', socket => {
 
 
     socket.on('key_down', ({ button }) => {
+        if (!authenticated) return
         try {
             button = keySort(button);
 
@@ -196,6 +235,7 @@ connections.on('connection', socket => {
     });
 
     socket.on('key_up', ({ button }) => {
+        if (!authenticated) return
         try {
             // setup button
             button = keySort(button);

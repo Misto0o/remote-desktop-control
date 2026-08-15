@@ -17,6 +17,12 @@ function App() {
   const rtcPeerConnection = useRef(null)
   const [status, setStatus] = useState('connecting...')
 
+  // Auth: host auto-authenticates itself; viewers must enter the PIN.
+  const [authenticated, setAuthenticated] = useState(isHost)
+  const authenticatedRef = useRef(isHost)
+  const [pinInput, setPinInput] = useState('')
+  const [authError, setAuthError] = useState('')
+
   const isDraggingRef = useRef(false)
   const hiddenInputRef = useRef()
   const prevInputValueRef = useRef('')
@@ -47,6 +53,22 @@ function App() {
     socket.on('icecandidate', (icecandidate) => {
       pc.addIceCandidate(new RTCIceCandidate(icecandidate)).catch(console.error)
     })
+
+    socket.on('auth-result', ({ ok }) => {
+      if (ok) {
+        setAuthenticated(true)
+        authenticatedRef.current = true
+        setAuthError('')
+      } else {
+        setAuthenticated(false)
+        authenticatedRef.current = false
+        setAuthError('Wrong PIN, try again.')
+      }
+    })
+
+    if (isHost) {
+      socket.emit('host-auth')
+    }
 
     if (isHost) {
       // ---------- HOST: capture the screen and broadcast it ----------
@@ -131,14 +153,24 @@ function App() {
           console.error('viewer: failed to handle offer', e)
         }
       })
-
-      socket.emit('viewer-ready')
     }
 
     return () => {
       pc.close()
     }
   }, [])
+
+  // Once a viewer is authenticated, tell the host we're ready for an offer.
+  useEffect(() => {
+    if (!isHost && authenticated) {
+      socket.emit('viewer-ready')
+    }
+  }, [authenticated])
+
+  const submitPin = (e) => {
+    e.preventDefault()
+    socket.emit('auth', pinInput)
+  }
 
   // ---------- Coordinate mapping ----------
   // Maps a point in on-screen (rendered) video pixels to host screen pixels,
@@ -286,11 +318,13 @@ function App() {
   }
 
   const handleKeyTap = (e) => {
+    if (!authenticatedRef.current) return // let normal typing (e.g. the PIN box) work
     e.preventDefault()
     socket.emit('key_down', { button: e.key })
   }
 
   const handleKeyReset = (e) => {
+    if (!authenticatedRef.current) return
     const special = ['Shift', 'Control', 'Alt']
     if (special.includes(e.key)) {
       socket.emit('key_up', { button: e.key })
@@ -364,6 +398,46 @@ function App() {
     }
     // Backspace is handled via the input/value diff above, not here,
     // since some mobile keyboards don't fire a real keydown for it.
+  }
+
+  if (!isHost && !authenticated) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        backgroundColor: '#111',
+        fontFamily: 'monospace',
+        color: 'white',
+        gap: 12,
+      }}>
+        <div>Enter PIN to connect</div>
+        <form onSubmit={submitPin} style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pinInput}
+            onChange={(e) => setPinInput(e.target.value)}
+            style={{
+              fontSize: 16,
+              padding: '8px 10px',
+              borderRadius: 6,
+              border: '1px solid #555',
+              background: '#222',
+              color: 'white',
+              width: 140,
+            }}
+          />
+          <button type="submit" style={{ padding: '8px 14px', borderRadius: 6 }}>
+            Connect
+          </button>
+        </form>
+        {authError && <div style={{ color: '#f66' }}>{authError}</div>}
+      </div>
+    )
   }
 
   return (
