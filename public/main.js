@@ -42,6 +42,33 @@ expressApp.get('/', function (req, res, next) {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+const https = require('https')
+
+const METERED_DOMAIN = 'mistai.metered.live'
+const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY
+
+expressApp.get('/turn-credentials', function (req, res) {
+    https.get(
+        `https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_SECRET_KEY}`,
+        (turnRes) => {
+            let data = ''
+            turnRes.on('data', (chunk) => { data += chunk })
+            turnRes.on('end', () => {
+                try {
+                    const iceServers = JSON.parse(data)
+                    res.json(iceServers)
+                } catch (error) {
+                    debugLog('failed to parse TURN credentials', error)
+                    res.status(500).json([])
+                }
+            })
+        }
+    ).on('error', (error) => {
+        debugLog('failed to fetch TURN credentials', error)
+        res.status(500).json([])
+    })
+})
+
 expressApp.set('port', 3000)
 expressApp.use(cors({ origin: '*' }))
 
@@ -179,11 +206,7 @@ connections.on('connection', socket => {
     }) => {
         if (!authenticated) return
         try {
-            if (!clientSelectedScreen || !clientSelectedScreen.displaySize) {
-                throw new Error('clientSelectedScreen or its displaySize is undefined');
-            }
-
-            const { displaySize: { width, height } } = clientSelectedScreen;
+            const { width, height } = robot.getScreenSize();
 
             const ratioX = width / clientWidth;
             const ratioY = height / clientHeight;

@@ -35,128 +35,170 @@ function App() {
   const [viewTransform, setViewTransform] = useState({ scale: 1, x: 0, y: 0 })
   const pinchStateRef = useRef(null) // { startDist, startScale, startX, startY, startMidX, startMidY }
 
+  const pendingSourceRef = useRef(null)
+  const startCaptureRef = useRef(null)
+
   useEffect(() => {
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-    })
-    rtcPeerConnection.current = pc
+    let pc // declared here so the cleanup function below can always see it
+    let cancelled = false
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate) socket.emit('icecandidate', e.candidate)
-    }
-
-    pc.oniceconnectionstatechange = () => {
-      console.log('ICE state:', pc.iceConnectionState)
-      setStatus(pc.iceConnectionState)
-    }
-
-    socket.on('icecandidate', (icecandidate) => {
-      pc.addIceCandidate(new RTCIceCandidate(icecandidate)).catch(console.error)
-    })
-
-    socket.on('auth-result', ({ ok }) => {
-      if (ok) {
-        setAuthenticated(true)
-        authenticatedRef.current = true
-        setAuthError('')
-      } else {
-        setAuthenticated(false)
-        authenticatedRef.current = false
-        setAuthError('Wrong PIN, try again.')
-      }
-    })
-
+    // Electron's preload.js pushes the screen source the moment the window
+    // is ready - it doesn't wait for us. Register this listener immediately
+    // (not behind the TURN fetch below) so we never miss it. If it arrives
+    // before the peer connection exists yet, stash it in a ref and pick it
+    // up once setup() finishes.
     if (isHost) {
-      socket.emit('host-auth')
-    }
-
-    if (isHost) {
-      // ---------- HOST: capture the screen and broadcast it ----------
-      setStatus('host: waiting for a viewer')
-
-      const startCapture = (sourceId) => {
-        navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: sourceId,
-              minWidth: 1280,
-              maxWidth: 1920,
-              minHeight: 720,
-              maxHeight: 1080,
-              maxFrameRate: 30,
-            },
-          },
-        }).then((stream) => {
-          stream.getTracks().forEach((track) => pc.addTrack(track, stream))
-          console.log('host: screen capture attached')
-        }).catch((e) => {
-          console.error('host: getUserMedia failed', e)
-          setStatus('host: capture failed - ' + e.message)
-        })
-      }
-
       window.electronAPI.getScreenId((event, source) => {
         console.log('host: got source id', source)
-        socket.emit('selectedScreen', source)
-        startCapture(source.id)
-      })
-
-      socket.on('viewer-ready', async () => {
-        console.log('host: viewer ready, creating offer')
-        try {
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          socket.emit('offer', offer)
-        } catch (e) {
-          console.error('host: failed to create offer', e)
-        }
-      })
-
-      socket.on('answer', async (answerSDP) => {
-        console.log('host: received answer')
-        try {
-          await pc.setRemoteDescription(new RTCSessionDescription(answerSDP))
-          setStatus('host: connected')
-        } catch (e) {
-          console.error('host: failed to set remote description', e)
-        }
-      })
-
-    } else {
-      // ---------- VIEWER: wait for the host's stream and render it ----------
-      setStatus('viewer: waiting for host')
-
-      pc.ontrack = (e) => {
-        console.log('viewer: track received')
-        const video = videoRef.current
-        video.srcObject = e.streams[0]
-        video.muted = true // muted autoplay is allowed without user interaction
-        video.playsInline = true // required for iOS Safari to play inline instead of fullscreen
-        video.onloadedmetadata = () => {
-          video.play().catch((err) => {
-            console.warn('autoplay blocked, will retry on first tap', err)
-          })
-        }
-        setStatus('viewer: connected')
-      }
-
-      socket.on('offer', async (offerSDP) => {
-        console.log('viewer: received offer')
-        try {
-          await pc.setRemoteDescription(new RTCSessionDescription(offerSDP))
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-          socket.emit('answer', answer)
-        } catch (e) {
-          console.error('viewer: failed to handle offer', e)
+        pendingSourceRef.current = source
+        if (rtcPeerConnection.current) {
+          startCaptureRef.current && startCaptureRef.current(source)
         }
       })
     }
 
+    const setup = async () => {
+      // Fetch fresh TURN credentials from our own server, which holds the
+      // Metered secret key server-side (never exposed to the browser).
+      let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
+      try {
+        const res = await fetch('/turn-credentials')
+        const fetched = await res.json()
+        if (Array.isArray(fetched) && fetched.length > 0) {
+          iceServers = fetched
+        }
+      } catch (e) {
+        console.warn('could not fetch TURN credentials, falling back to STUN only', e)
+      }
+
+      if (cancelled) return
+
+      pc = new RTCPeerConnection({ iceServers })
+      rtcPeerConnection.current = pc
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) socket.emit('icecandidate', e.candidate)
+      }
+
+      pc.oniceconnectionstatechange = () => {
+        console.log('ICE state:', pc.iceConnectionState)
+        setStatus(pc.iceConnectionState)
+      }
+
+      socket.on('icecandidate', (icecandidate) => {
+        pc.addIceCandidate(new RTCIceCandidate(icecandidate)).catch(console.error)
+      })
+
+      socket.on('auth-result', ({ ok }) => {
+        if (ok) {
+          setAuthenticated(true)
+          authenticatedRef.current = true
+          setAuthError('')
+        } else {
+          setAuthenticated(false)
+          authenticatedRef.current = false
+          setAuthError('Wrong PIN, try again.')
+        }
+      })
+
+      if (isHost) {
+        socket.emit('host-auth')
+      }
+
+      if (isHost) {
+        // ---------- HOST: capture the screen and broadcast it ----------
+        setStatus('host: waiting for a viewer')
+
+        const startCapture = (source) => {
+          socket.emit('selectedScreen', source)
+          navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: source.id,
+                minWidth: 1280,
+                maxWidth: 1920,
+                minHeight: 720,
+                maxHeight: 1080,
+                maxFrameRate: 30,
+              },
+            },
+          }).then((stream) => {
+            stream.getTracks().forEach((track) => pc.addTrack(track, stream))
+            console.log('host: screen capture attached')
+          }).catch((e) => {
+            console.error('host: getUserMedia failed', e)
+            setStatus('host: capture failed - ' + e.message)
+          })
+        }
+
+        startCaptureRef.current = startCapture
+
+        // The source may have already arrived (and been stashed in the ref)
+        // before this point, while we were still awaiting the TURN fetch.
+        if (pendingSourceRef.current) {
+          startCapture(pendingSourceRef.current)
+        }
+
+        socket.on('viewer-ready', async () => {
+          console.log('host: viewer ready, creating offer')
+          try {
+            const offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            socket.emit('offer', offer)
+          } catch (e) {
+            console.error('host: failed to create offer', e)
+          }
+        })
+
+        socket.on('answer', async (answerSDP) => {
+          console.log('host: received answer')
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(answerSDP))
+            setStatus('host: connected')
+          } catch (e) {
+            console.error('host: failed to set remote description', e)
+          }
+        })
+
+      } else {
+        // ---------- VIEWER: wait for the host's stream and render it ----------
+        setStatus('viewer: waiting for host')
+
+        pc.ontrack = (e) => {
+          console.log('viewer: track received')
+          const video = videoRef.current
+          video.srcObject = e.streams[0]
+          video.muted = true // muted autoplay is allowed without user interaction
+          video.playsInline = true // required for iOS Safari to play inline instead of fullscreen
+          video.onloadedmetadata = () => {
+            video.play().catch((err) => {
+              console.warn('autoplay blocked, will retry on first tap', err)
+            })
+          }
+          setStatus('viewer: connected')
+        }
+
+        socket.on('offer', async (offerSDP) => {
+          console.log('viewer: received offer')
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(offerSDP))
+            const answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            socket.emit('answer', answer)
+          } catch (e) {
+            console.error('viewer: failed to handle offer', e)
+          }
+        })
+      }
+    } // end of setup()
+
+    setup()
+
     return () => {
-      pc.close()
+      cancelled = true
+      if (pc) pc.close()
     }
   }, [])
 

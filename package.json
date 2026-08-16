@@ -48,7 +48,7 @@
       "last 1 safari version"
     ]
   },
-"config": {
+  "config": {
     "forge": {
       "packagerConfig": {},
       "rebuildConfig": {
