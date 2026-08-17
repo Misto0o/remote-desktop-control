@@ -154,9 +154,6 @@ connections.on('connection', socket => {
         socket.broadcast.emit('selectedScreen', clientSelectedScreen)
     })
 
-
-
-
     let isDragging = false;
 
     socket.on('mouse_down', ({ button }) => {
