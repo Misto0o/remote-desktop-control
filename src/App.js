@@ -3,9 +3,10 @@ import { useRef, useEffect, useState } from 'react'
 import io from 'socket.io-client'
 
 // Change this to your current ngrok URL whenever it changes.
-const SIGNALING_URL = 'https://minutial-uncloying-diedre.ngrok-free.dev/remote-ctrl'
-
-const socket = io(SIGNALING_URL)
+// Connect relative to whatever origin this page was loaded from - no
+// hardcoded domain needed. The host loads from localhost; viewers load
+// from whatever ngrok domain is configured in the host's Settings panel.
+const socket = io('/remote-ctrl')
 
 // Electron injects window.electronAPI via preload.js.
 // If it's present, this instance is the HOST (the machine being viewed/controlled).
@@ -16,6 +17,14 @@ function App() {
   const videoRef = useRef()
   const rtcPeerConnection = useRef(null)
   const [status, setStatus] = useState('connecting...')
+
+  // Host-only settings panel state
+  const [showSettings, setShowSettings] = useState(false)
+  const [config, setConfig] = useState(null) // { ngrokDomain, meteredSecretKey, pin }
+  const [settingsForm, setSettingsForm] = useState({ ngrokDomain: '', meteredSecretKey: '', pin: '' })
+  const [settingsSaved, setSettingsSaved] = useState(false)
+  const [ngrokStatus, setNgrokStatus] = useState('stopped')
+  const [ngrokLog, setNgrokLog] = useState('')
 
   // Auth: host auto-authenticates itself; viewers must enter the PIN.
   const [authenticated, setAuthenticated] = useState(isHost)
@@ -37,6 +46,8 @@ function App() {
 
   const pendingSourceRef = useRef(null)
   const startCaptureRef = useRef(null)
+  const capturedStreamRef = useRef(null) // survives across peer connection recreations
+  const iceServersRef = useRef([{ urls: 'stun:stun.l.google.com:19302' }])
 
   useEffect(() => {
     let pc // declared here so the cleanup function below can always see it
@@ -70,128 +81,157 @@ function App() {
       } catch (e) {
         console.warn('could not fetch TURN credentials, falling back to STUN only', e)
       }
+      iceServersRef.current = iceServers
 
       if (cancelled) return
 
       pc = new RTCPeerConnection({ iceServers })
       rtcPeerConnection.current = pc
 
-      pc.onicecandidate = (e) => {
-        if (e.candidate) socket.emit('icecandidate', e.candidate)
+    pc.onicecandidate = (e) => {
+      if (e.candidate) socket.emit('icecandidate', e.candidate)
+    }
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE state:', pc.iceConnectionState)
+      setStatus(pc.iceConnectionState)
+    }
+
+    socket.on('icecandidate', (icecandidate) => {
+      pc.addIceCandidate(new RTCIceCandidate(icecandidate)).catch(console.error)
+    })
+
+    socket.on('auth-result', ({ ok }) => {
+      if (ok) {
+        setAuthenticated(true)
+        authenticatedRef.current = true
+        setAuthError('')
+      } else {
+        setAuthenticated(false)
+        authenticatedRef.current = false
+        setAuthError('Wrong PIN, try again.')
+      }
+    })
+
+    if (isHost) {
+      socket.emit('host-auth')
+    }
+
+    if (isHost) {
+      // ---------- HOST: capture the screen and broadcast it ----------
+      setStatus('host: waiting for a viewer')
+
+      const attachIceHandlers = (peerConn) => {
+        peerConn.onicecandidate = (e) => {
+          if (e.candidate) socket.emit('icecandidate', e.candidate)
+        }
+        peerConn.oniceconnectionstatechange = () => {
+          console.log('ICE state:', peerConn.iceConnectionState)
+          setStatus(peerConn.iceConnectionState)
+        }
       }
 
-      pc.oniceconnectionstatechange = () => {
-        console.log('ICE state:', pc.iceConnectionState)
-        setStatus(pc.iceConnectionState)
+      attachIceHandlers(pc)
+
+      const startCapture = (source) => {
+        socket.emit('selectedScreen', source)
+        navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: source.id,
+              minWidth: 1280,
+              maxWidth: 1920,
+              minHeight: 720,
+              maxHeight: 1080,
+              maxFrameRate: 30,
+            },
+          },
+        }).then((stream) => {
+          capturedStreamRef.current = stream
+          stream.getTracks().forEach((track) => pc.addTrack(track, stream))
+          console.log('host: screen capture attached')
+        }).catch((e) => {
+          console.error('host: getUserMedia failed', e)
+          setStatus('host: capture failed - ' + e.message)
+        })
       }
 
-      socket.on('icecandidate', (icecandidate) => {
-        pc.addIceCandidate(new RTCIceCandidate(icecandidate)).catch(console.error)
-      })
+      startCaptureRef.current = startCapture
 
-      socket.on('auth-result', ({ ok }) => {
-        if (ok) {
-          setAuthenticated(true)
-          authenticatedRef.current = true
-          setAuthError('')
-        } else {
-          setAuthenticated(false)
-          authenticatedRef.current = false
-          setAuthError('Wrong PIN, try again.')
+      // The source may have already arrived (and been stashed in the ref)
+      // before this point, while we were still awaiting the TURN fetch.
+      if (pendingSourceRef.current) {
+        startCapture(pendingSourceRef.current)
+      }
+
+      // A fresh viewer means we should start from a clean peer connection,
+      // not renegotiate on top of a possibly-stale one from a previous
+      // session (this was causing growing lag / duplicate ICE candidates
+      // on every phone reconnect).
+      socket.on('viewer-ready', async () => {
+        console.log('host: viewer ready, creating fresh peer connection + offer')
+        try {
+          if (pc) pc.close()
+          pc = new RTCPeerConnection({ iceServers: iceServersRef.current })
+          rtcPeerConnection.current = pc
+          attachIceHandlers(pc)
+
+          if (capturedStreamRef.current) {
+            capturedStreamRef.current.getTracks().forEach((track) =>
+              pc.addTrack(track, capturedStreamRef.current)
+            )
+          }
+
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          socket.emit('offer', offer)
+        } catch (e) {
+          console.error('host: failed to create offer', e)
         }
       })
 
-      if (isHost) {
-        socket.emit('host-auth')
-      }
+      socket.on('answer', async (answerSDP) => {
+        console.log('host: received answer')
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(answerSDP))
+          setStatus('host: connected')
+        } catch (e) {
+          console.error('host: failed to set remote description', e)
+        }
+      })
 
-      if (isHost) {
-        // ---------- HOST: capture the screen and broadcast it ----------
-        setStatus('host: waiting for a viewer')
+    } else {
+      // ---------- VIEWER: wait for the host's stream and render it ----------
+      setStatus('viewer: waiting for host')
 
-        const startCapture = (source) => {
-          socket.emit('selectedScreen', source)
-          navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-              mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: source.id,
-                minWidth: 1280,
-                maxWidth: 1920,
-                minHeight: 720,
-                maxHeight: 1080,
-                maxFrameRate: 30,
-              },
-            },
-          }).then((stream) => {
-            stream.getTracks().forEach((track) => pc.addTrack(track, stream))
-            console.log('host: screen capture attached')
-          }).catch((e) => {
-            console.error('host: getUserMedia failed', e)
-            setStatus('host: capture failed - ' + e.message)
+      pc.ontrack = (e) => {
+        console.log('viewer: track received')
+        const video = videoRef.current
+        video.srcObject = e.streams[0]
+        video.muted = true // muted autoplay is allowed without user interaction
+        video.playsInline = true // required for iOS Safari to play inline instead of fullscreen
+        video.onloadedmetadata = () => {
+          video.play().catch((err) => {
+            console.warn('autoplay blocked, will retry on first tap', err)
           })
         }
-
-        startCaptureRef.current = startCapture
-
-        // The source may have already arrived (and been stashed in the ref)
-        // before this point, while we were still awaiting the TURN fetch.
-        if (pendingSourceRef.current) {
-          startCapture(pendingSourceRef.current)
-        }
-
-        socket.on('viewer-ready', async () => {
-          console.log('host: viewer ready, creating offer')
-          try {
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-            socket.emit('offer', offer)
-          } catch (e) {
-            console.error('host: failed to create offer', e)
-          }
-        })
-
-        socket.on('answer', async (answerSDP) => {
-          console.log('host: received answer')
-          try {
-            await pc.setRemoteDescription(new RTCSessionDescription(answerSDP))
-            setStatus('host: connected')
-          } catch (e) {
-            console.error('host: failed to set remote description', e)
-          }
-        })
-
-      } else {
-        // ---------- VIEWER: wait for the host's stream and render it ----------
-        setStatus('viewer: waiting for host')
-
-        pc.ontrack = (e) => {
-          console.log('viewer: track received')
-          const video = videoRef.current
-          video.srcObject = e.streams[0]
-          video.muted = true // muted autoplay is allowed without user interaction
-          video.playsInline = true // required for iOS Safari to play inline instead of fullscreen
-          video.onloadedmetadata = () => {
-            video.play().catch((err) => {
-              console.warn('autoplay blocked, will retry on first tap', err)
-            })
-          }
-          setStatus('viewer: connected')
-        }
-
-        socket.on('offer', async (offerSDP) => {
-          console.log('viewer: received offer')
-          try {
-            await pc.setRemoteDescription(new RTCSessionDescription(offerSDP))
-            const answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
-            socket.emit('answer', answer)
-          } catch (e) {
-            console.error('viewer: failed to handle offer', e)
-          }
-        })
+        setStatus('viewer: connected')
       }
+
+      socket.on('offer', async (offerSDP) => {
+        console.log('viewer: received offer')
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(offerSDP))
+          const answer = await pc.createAnswer()
+          await pc.setLocalDescription(answer)
+          socket.emit('answer', answer)
+        } catch (e) {
+          console.error('viewer: failed to handle offer', e)
+        }
+      })
+    }
     } // end of setup()
 
     setup()
@@ -212,6 +252,61 @@ function App() {
   const submitPin = (e) => {
     e.preventDefault()
     socket.emit('auth', pinInput)
+  }
+
+  // ---------- Host settings panel ----------
+  useEffect(() => {
+    if (!isHost) return
+    window.electronAPI.getConfig().then((c) => {
+      setConfig(c)
+      setSettingsForm({
+        ngrokDomain: c.ngrokDomain || '',
+        meteredSecretKey: c.meteredSecretKey || '',
+        pin: c.pin || '',
+      })
+    })
+  }, [])
+
+  const saveSettings = async (e) => {
+    e.preventDefault()
+    const updated = await window.electronAPI.saveConfig(settingsForm)
+    setConfig(updated)
+    setSettingsSaved(true)
+    setTimeout(() => setSettingsSaved(false), 2000)
+  }
+
+  // ---------- ngrok control ----------
+  useEffect(() => {
+    if (!isHost) return
+    window.electronAPI.onNgrokLog((event, line) => {
+      setNgrokLog((prev) => (prev + line).slice(-4000)) // keep it bounded
+    })
+    const poll = setInterval(() => {
+      window.electronAPI.ngrokStatus().then(({ status }) => setNgrokStatus(status))
+    }, 2000)
+    return () => clearInterval(poll)
+  }, [])
+
+  const startTunnel = async () => {
+    setNgrokStatus('starting')
+    const result = await window.electronAPI.startNgrok()
+    if (!result.ok) {
+      setNgrokLog((prev) => prev + `\nCouldn't start: ${result.error}\n`)
+      setNgrokStatus('error')
+    }
+  }
+
+  const stopTunnel = async () => {
+    await window.electronAPI.stopNgrok()
+    setNgrokStatus('stopped')
+  }
+
+  const viewerLink = config && config.ngrokDomain
+    ? `https://${config.ngrokDomain.replace(/^https?:\/\//, '').replace(/\/$/, '')}`
+    : null
+
+  const copyViewerLink = () => {
+    if (viewerLink) navigator.clipboard.writeText(viewerLink)
   }
 
   // ---------- Coordinate mapping ----------
@@ -389,7 +484,7 @@ function App() {
   const handleUserGesture = () => {
     const video = videoRef.current
     if (video && video.paused) {
-      video.play().catch(() => { })
+      video.play().catch(() => {})
     }
   }
 
@@ -484,22 +579,130 @@ function App() {
 
   return (
     <div className="App" onClick={handleUserGesture}>
-      <div style={{
-        color: 'white',
-        backgroundColor: '#222',
-        fontFamily: 'monospace',
-        padding: 6,
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        zIndex: 10,
-      }}>
-        {isHost ? 'HOST' : 'VIEWER'} — {status}
-      </div>
+      {!isHost && (
+        <div style={{
+          color: 'white',
+          backgroundColor: '#222',
+          fontFamily: 'monospace',
+          padding: 6,
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 10,
+        }}>
+          VIEWER — {status}
+        </div>
+      )}
       {isHost ? (
-        <div style={{ color: '#888', padding: 16, fontFamily: 'monospace' }}>
-          Broadcasting this screen. Open the viewer URL on another device to see it.
+        <div className="dashboard">
+          <div className="dashboard-inner">
+            <div className="dashboard-header">
+              <h1 className="dashboard-title">Remote Desktop</h1>
+              <p className="dashboard-subtitle">
+                Broadcasting this screen. Open the viewer link on another
+                device to see and control it.
+              </p>
+            </div>
+
+            {viewerLink ? (
+              <>
+                <div className="card">
+                  <div className="link-row">
+                    <span className="link-text">{viewerLink}</span>
+                    <button className="btn" onClick={copyViewerLink}>Copy</button>
+                  </div>
+                </div>
+
+                <div className="card qr-wrap">
+                  <img
+                    alt="QR code for viewer link"
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(viewerLink)}`}
+                    width={160}
+                    height={160}
+                  />
+                </div>
+
+                <div className="card">
+                  <div className="status-row" style={{ marginBottom: ngrokLog ? 12 : 0 }}>
+                    <span className={`status-dot ${ngrokStatus}`} />
+                    <span className="status-label">
+                      Tunnel — <span className="value">{ngrokStatus}</span>
+                    </span>
+                    <div style={{ flex: 1 }} />
+                    {ngrokStatus === 'stopped' || ngrokStatus === 'error' ? (
+                      <button className="btn btn-primary" onClick={startTunnel}>
+                        Start tunnel
+                      </button>
+                    ) : (
+                      <button className="btn btn-danger" onClick={stopTunnel}>
+                        Stop tunnel
+                      </button>
+                    )}
+                  </div>
+                  {ngrokLog && <pre className="log-panel">{ngrokLog}</pre>}
+                </div>
+              </>
+            ) : (
+              <div className="notice">
+                No ngrok domain set yet — open Settings below to add one.
+              </div>
+            )}
+
+            <button
+              className="settings-toggle"
+              onClick={() => setShowSettings((s) => !s)}
+            >
+              {showSettings ? '▾ Hide settings' : '▸ Settings'}
+            </button>
+
+            {showSettings && (
+              <form onSubmit={saveSettings} className="card">
+                <div className="field">
+                  <label className="field-label">ngrok domain</label>
+                  <input
+                    type="text"
+                    placeholder="your-domain.ngrok-free.dev"
+                    value={settingsForm.ngrokDomain}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, ngrokDomain: e.target.value })}
+                  />
+                </div>
+
+                <div className="field">
+                  <label className="field-label">TURN API key</label>
+                  <input
+                    type="password"
+                    value={settingsForm.meteredSecretKey}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, meteredSecretKey: e.target.value })}
+                  />
+                  <span className="field-hint">
+                    From metered.ca → TURN Server → Show API Key. Enables
+                    video over cellular data.
+                  </span>
+                </div>
+
+                <div className="field">
+                  <label className="field-label">Viewer PIN</label>
+                  <input
+                    type="text"
+                    value={settingsForm.pin}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, pin: e.target.value })}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button type="submit" className="btn btn-primary">Save</button>
+                  {settingsSaved && <span className="save-confirm">✓ Saved</span>}
+                </div>
+
+                <p className="field-hint" style={{ marginTop: 14, marginBottom: 0 }}>
+                  Requires ngrok installed and logged in on this machine
+                  (<code>ngrok config add-authtoken ...</code>) at least once
+                  beforehand.
+                </p>
+              </form>
+            )}
+          </div>
         </div>
       ) : (
         <>

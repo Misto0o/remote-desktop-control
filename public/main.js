@@ -7,6 +7,9 @@ const {
     powerMonitor,
 } = require('electron')
 const path = require('path')
+const fs = require('fs')
+const https = require('https')
+const { spawn } = require('child_process')
 const robot = require('@hurdlegroup/robotjs')
 
 const cors = require('cors')
@@ -23,11 +26,132 @@ const { createServer } = require('http')
 const { Server } = require('socket.io');
 const { Simulate } = require('react-dom/test-utils');
 
-// PIN required before a viewer can request/control the stream.
-// Set your own PIN via an environment variable rather than hardcoding it -
-// e.g. in PowerShell: $env:REMOTE_PIN = "your-secret-pin"; yarn start
-// Falls back to a default if not set, so make sure to actually set your own.
-const PIN = process.env.REMOTE_PIN || 'changeme123'
+// ---------- Persistent config ----------
+// Stored as a plain JSON file in Electron's per-user data folder, so it
+// survives app restarts and never needs to be committed to the repo or set
+// as an environment variable. Edited from the Settings panel on the host
+// screen in the app itself.
+const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
+
+const DEFAULT_CONFIG = {
+    ngrokDomain: '',       // e.g. "minutial-uncloying-diedre.ngrok-free.dev"
+    meteredSecretKey: '',  // TURN credential API key from metered.ca
+    pin: 'changeme123',
+}
+
+function loadConfig() {
+    try {
+        const raw = fs.readFileSync(CONFIG_PATH, 'utf-8')
+        return { ...DEFAULT_CONFIG, ...JSON.parse(raw) }
+    } catch (e) {
+        return { ...DEFAULT_CONFIG }
+    }
+}
+
+function saveConfig(newConfig) {
+    const merged = { ...loadConfig(), ...newConfig }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2))
+    return merged
+}
+
+let config = loadConfig()
+
+// ---------- ngrok auto-launch ----------
+// Spawns `ngrok http --domain=... 3001` as a child process instead of
+// requiring you to run it manually in a separate terminal. Assumes `ngrok`
+// is on your PATH (true if you installed it via winget/Microsoft Store and
+// have used it from a terminal before).
+let ngrokProcess = null
+let ngrokLogLines = []
+let ngrokStatus = 'stopped' // 'stopped' | 'starting' | 'online' | 'error'
+
+function appendNgrokLog(line) {
+    ngrokLogLines.push(line)
+    if (ngrokLogLines.length > 100) ngrokLogLines.shift()
+    if (mainWindow) mainWindow.webContents.send('ngrok-log', line)
+}
+
+function sanitizeDomain(raw) {
+    return (raw || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+}
+
+function startNgrok() {
+    if (ngrokProcess) return { ok: false, error: 'ngrok is already running' }
+    const domain = sanitizeDomain(config.ngrokDomain)
+    if (!domain) return { ok: false, error: 'No ngrok domain set in Settings' }
+
+    ngrokStatus = 'starting'
+    ngrokLogLines = []
+
+    try {
+        ngrokProcess = spawn(
+            'ngrok',
+            ['http', `--url=https://${domain}`, '3001'],
+            { shell: true }
+        )
+    } catch (e) {
+        ngrokStatus = 'error'
+        return { ok: false, error: e.message }
+    }
+
+    ngrokProcess.stdout.on('data', (data) => {
+        const text = data.toString()
+        appendNgrokLog(text)
+        // Best-effort check of the accumulated log. The more reliable signal
+        // is a real viewer authenticating (see the 'auth' handler below),
+        // this is just to get the dot green a little sooner if possible.
+        const fullLog = ngrokLogLines.join('')
+        if (/online/i.test(fullLog) || /forwarding/i.test(fullLog)) {
+            ngrokStatus = 'online'
+        }
+    })
+
+    ngrokProcess.stderr.on('data', (data) => {
+        appendNgrokLog(data.toString())
+    })
+
+    // Fallback: if the process is still alive after a few seconds with no
+    // error, assume the tunnel came up fine even if we couldn't detect the
+    // "online" text in its output. Confirmed properly the moment a real
+    // viewer connects, via the 'auth' handler below.
+    setTimeout(() => {
+        if (ngrokProcess && ngrokStatus === 'starting') {
+            ngrokStatus = 'online'
+        }
+    }, 4000)
+
+    ngrokProcess.on('exit', (code) => {
+        appendNgrokLog(`ngrok exited with code ${code}`)
+        ngrokProcess = null
+        ngrokStatus = 'stopped'
+    })
+
+    ngrokProcess.on('error', (err) => {
+        appendNgrokLog(`Failed to start ngrok: ${err.message}. Is it installed and on your PATH?`)
+        ngrokProcess = null
+        ngrokStatus = 'error'
+    })
+
+    return { ok: true }
+}
+
+function stopNgrok() {
+    if (ngrokProcess) {
+        const pid = ngrokProcess.pid
+        // On Windows, spawning with shell:true runs ngrok inside a cmd.exe
+        // wrapper. A plain .kill() only kills that wrapper and leaves the
+        // actual ngrok.exe running orphaned in the background. /T kills the
+        // whole process tree instead.
+        if (process.platform === 'win32') {
+            spawn('taskkill', ['/PID', pid, '/T', '/F'])
+        } else {
+            ngrokProcess.kill()
+        }
+        ngrokProcess = null
+        ngrokStatus = 'stopped'
+    }
+    return { ok: true }
+}
 
 expressApp.use(express.static(__dirname));
 
@@ -42,14 +166,34 @@ expressApp.get('/', function (req, res, next) {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-const https = require('https')
+expressApp.set('port', 3000)
+expressApp.use(cors({ origin: '*' }))
 
+expressApp.use(function (req, res, next) {
+    // Website you wish to allow to connect
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Request methods you wish to allow
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+    // Request headers you wish to allow
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type');
+    // Set to true if you need the website to include cookies in the requests sent
+    // to the API (e.g. in case you use sessions)
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    // Pass to next layer of middleware
+    next();
+})
+
+// TURN credentials, fetched fresh server-side using the (never exposed to
+// the browser) Metered API key from config.
 const METERED_DOMAIN = 'mistai.metered.live'
-const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY
 
 expressApp.get('/turn-credentials', function (req, res) {
+    if (!config.meteredSecretKey) {
+        res.json([]) // no TURN key configured yet - STUN-only fallback
+        return
+    }
     https.get(
-        `https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_SECRET_KEY}`,
+        `https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${config.meteredSecretKey}`,
         (turnRes) => {
             let data = ''
             turnRes.on('data', (chunk) => { data += chunk })
@@ -67,23 +211,6 @@ expressApp.get('/turn-credentials', function (req, res) {
         debugLog('failed to fetch TURN credentials', error)
         res.status(500).json([])
     })
-})
-
-expressApp.set('port', 3000)
-expressApp.use(cors({ origin: '*' }))
-
-expressApp.use(function (req, res, next) {
-    // Website you wish to allow to connect
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    // Request methods you wish to allow
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
-    // Request headers you wish to allow
-    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type');
-    // Set to true if you need the website to include cookies in the requests sent
-    // to the API (e.g. in case you use sessions)
-    res.setHeader('Access-Control-Allow-Credentials', true);
-    // Pass to next layer of middleware
-    next();
 })
 
 const httpServer = createServer(expressApp)
@@ -105,10 +232,17 @@ connections.on('connection', socket => {
     let authenticated = false
 
     socket.on('auth', (pin) => {
-        if (pin === PIN) {
+        if (pin === config.pin) {
             authenticated = true
             socket.emit('auth-result', { ok: true })
             debugLog('client authenticated')
+            // A real viewer successfully connecting is the clearest possible
+            // proof the tunnel is actually working end-to-end - simpler and
+            // more reliable than trying to parse ngrok's terminal output.
+            if (ngrokProcess && ngrokStatus !== 'online') {
+                ngrokStatus = 'online'
+                appendNgrokLog('\n[viewer connected - tunnel confirmed working]\n')
+            }
         } else {
             socket.emit('auth-result', { ok: false })
             debugLog('auth failed - wrong pin')
@@ -154,6 +288,9 @@ connections.on('connection', socket => {
         socket.broadcast.emit('selectedScreen', clientSelectedScreen)
     })
 
+
+
+
     let isDragging = false;
 
     socket.on('mouse_down', ({ button }) => {
@@ -175,28 +312,6 @@ connections.on('connection', socket => {
         //console.log("Mouse up: " + button)
         // Finalize any dragging operations if necessary
     });
-
-    /*    
-    socket.on('mouse_move', ({
-        clientX, clientY, clientWidth, clientHeight,
-    }) => {
-        const { displaySize: { width, height }, } = clientSelectedScreen
-        const ratioX = width / clientWidth
-        const ratioY = height / clientHeight
-
-        const hostX = clientX * ratioX
-        const hostY = clientY * ratioY
-
-        //robot.moveMouse(hostX, hostY) 
-
-        if (isDragging) {
-            // Optional: If dragging, move the window or element
-            // Implement the logic here to drag the specific window or element
-           // robot.mouseToggle("down", "left");
-            robot.dragMouse(hostX, hostY)
-        } else robot.moveMouse(hostX, hostY);
-    })
-    */
 
     socket.on('mouse_move', ({
         clientX, clientY, clientWidth, clientHeight,
@@ -243,26 +358,18 @@ connections.on('connection', socket => {
                 robot.keyToggle(button, "down")
             } else
                 robot.keyTap(button);
-            /*
-            if (Special.includes(button)) {
-                robot.keyToggle(button, "down")
-            }
-            */
         } catch (error) {
             console.error('An error occurred while processing the key press:', error);
-            // Optional: Log the error to a file or use a more sophisticated error-tracking system
         }
     });
 
     socket.on('key_up', ({ button }) => {
         if (!authenticated) return
         try {
-            // setup button
             button = keySort(button);
             robot.keyToggle(button, 'up');
         } catch (error) {
             console.error('An error occurred while processing the key press:', error);
-            // Optional: Log the error to a file or use a more sophisticated error-tracking system
         }
     });
 
@@ -292,23 +399,11 @@ connections.on('connection', socket => {
         }
 
         if (Namespace[button]) {
-            //console.log(button, " namespace found")
             return Namespace[button];
         }
-        //console.log(button, " namespace not found")
         return button
     }
 });
-/*
-const sendSelectedScreen = (item) => {
-    const displaySize = displays.filter(display => `${display.id}` === item.display_id)[0].size
-    console.log(displaySize);
-    mainWindow.webContents.send('SET_SOURCE_ID', {
-        id: item.id,
-        displaySize,
-    })
-}
-*/
 
 const sendSelectedScreen = (item) => {
     try {
@@ -381,14 +476,16 @@ const createWindow = () => {
         const { width, height } = size
         try {
             debugLog('electron dim..', width, height)
-            // mainWindow.setSize(width, height || 500, true)
             !isNaN(height) && mainWindow.setSize(width, height, false)
         } catch (e) {
             handleError(e)
         }
     })
 
-    mainWindow.loadURL('https://minutial-uncloying-diedre.ngrok-free.dev/')
+    // The host loads its own local server directly - it doesn't need to go
+    // through ngrok to reach itself. Only remote viewers need the tunnel.
+    mainWindow.loadURL('http://localhost:3001/')
+
     mainWindow.once('ready-to-show', () => {
         displays = screen.getAllDisplays()
 
@@ -397,23 +494,34 @@ const createWindow = () => {
 
         desktopCapturer.getSources({
             types: ['screen']
-            // types: ['window', 'screen']
         }).then(sources => {
             sendSelectedScreen(sources[0])
             availableScreens = sources
             createTray()
-            /*for (const source of sources) {
-                console.log(sources)
-                if (source.name === 'Screen 1') {
-                    mainWindow.webContents.send('SET_SOURCE_ID', source.id)
-                    return
-                }
-            }*/
         })
     })
 
     //mainWindow.webContents.openDevTools()
 }
+
+// ---------- IPC: settings panel support ----------
+ipcMain.handle('get-config', () => config)
+
+ipcMain.handle('save-config', (event, newConfig) => {
+    if (newConfig.ngrokDomain !== undefined) {
+        newConfig = { ...newConfig, ngrokDomain: sanitizeDomain(newConfig.ngrokDomain) }
+    }
+    config = saveConfig(newConfig)
+    return config
+})
+
+ipcMain.handle('start-ngrok', () => startNgrok())
+ipcMain.handle('stop-ngrok', () => stopNgrok())
+ipcMain.handle('ngrok-status', () => ({ status: ngrokStatus, log: ngrokLogLines.join('') }))
+
+app.on('before-quit', () => {
+    stopNgrok()
+})
 
 // Debugging utility functions
 const debugLog = (...args) => {

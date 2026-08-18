@@ -1,38 +1,279 @@
-.App {
-  text-align: center;
+/* ============================================================
+   Host dashboard - polished dark minimal theme
+   Append this to the bottom of src/App.css
+   ============================================================ */
+
+:root {
+  --bg: #0d0e10;
+  --surface: #16171a;
+  --surface-hover: #1d1e22;
+  --border: #26272b;
+  --text: #e8e8ea;
+  --text-dim: #8b8d94;
+  --accent: #5b8cff;
+  --accent-dim: #3a5cc4;
+  --good: #3ecf8e;
+  --warn: #e8b339;
+  --bad: #e85d5d;
+  --radius: 10px;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+.dashboard {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  display: flex;
+  justify-content: center;
+  padding: 48px 20px;
+  box-sizing: border-box;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
+.dashboard-inner {
+  width: 100%;
+  max-width: 460px;
+}
+
+.dashboard-header {
+  margin-bottom: 28px;
+}
+
+.dashboard-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px 0;
+}
+
+.dashboard-subtitle {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.link-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0 4px 0;
+}
+
+.qr-wrap img {
+  border-radius: 8px;
+  display: block;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background: var(--good);
+  box-shadow: 0 0 0 0 rgba(62, 207, 142, 0.6);
+  animation: pulse 2s infinite;
+}
+
+.status-dot.starting {
+  background: var(--warn);
+}
+
+.status-dot.error {
+  background: var(--bad);
+}
+
+.status-dot.stopped {
+  background: #4a4b50;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(62, 207, 142, 0.5);
+  }
+
+  70% {
+    box-shadow: 0 0 0 8px rgba(62, 207, 142, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(62, 207, 142, 0);
   }
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
+.status-label {
+  color: var(--text-dim);
+}
+
+.status-label .value {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.btn:hover {
+  background: var(--surface-hover);
+  border-color: #3a3b40;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
   color: white;
 }
 
-.App-link {
-  color: #61dafb;
+.btn-primary:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.btn-danger {
+  background: transparent;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.btn-danger:hover {
+  background: rgba(232, 93, 93, 0.1);
+}
+
+.btn-full {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 13px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px 0;
+  margin-bottom: 8px;
+}
+
+.settings-toggle:hover {
+  color: var(--text);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.field:last-of-type {
+  margin-bottom: 16px;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.field-hint {
+  font-size: 11px;
+  color: #63656c;
+  line-height: 1.4;
+}
+
+.field input {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 9px 11px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.field input:focus {
+  border-color: var(--accent);
+}
+
+.save-confirm {
+  color: var(--good);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-height: 130px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.notice {
+  font-size: 13px;
+  color: var(--warn);
+  background: rgba(232, 179, 57, 0.08);
+  border: 1px solid rgba(232, 179, 57, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  line-height: 1.5;
 }
