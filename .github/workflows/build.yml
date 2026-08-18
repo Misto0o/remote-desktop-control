@@ -1,0 +1,67 @@
+name: Build Windows Installer
+
+# Two ways to trigger this:
+# 1. Push a tag like "v1.0.1" -> builds AND creates/updates a GitHub Release
+#    with the installer attached automatically.
+# 2. Manually from the Actions tab ("Run workflow") -> builds only, and you
+#    download the installer as a workflow artifact. Handy for testing a
+#    change (like this title fix) before deciding to cut a real release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed so the release step can attach the installer
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack (for Yarn Berry)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build React app
+        run: yarn build
+
+      - name: Build Windows installer
+        run: yarn make
+
+      - name: Find the installer file
+        id: find_installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "out/make/squirrel.windows/x64" -Filter "*Setup.exe" | Select-Object -First 1
+          echo "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          echo "name=$($installer.Name)" >> $env:GITHUB_OUTPUT
+
+      # Always upload as a workflow artifact - useful for manual runs where
+      # you just want to grab and test the installer without publishing
+      # anything.
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ steps.find_installer.outputs.path }}
+
+      # Only create/update a GitHub Release when this run was triggered by
+      # an actual version tag push, not a manual test run.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.find_installer.outputs.path }}
+          generate_release_notes: true
