@@ -1,179 +1,140 @@
 # control_desktop
 
-A self-hosted remote desktop tool: an Electron app broadcasts your screen and
-accepts mouse/keyboard input over WebRTC + Socket.IO, tunneled through ngrok
-so you can view and control the machine from any browser — including your
-phone — without needing both devices on the same network.
+Remote control your PC from your phone (or any browser) — no same-WiFi
+requirement, no port forwarding, no messing with your router. Just install
+it, open the app, and scan a QR code.
 
-## Credits
+Built on top of a project originally made by **Amir Eshaq**, tweaked by my
+friend Xander, and then heavily rebuilt by me. See the [Credits](#credits)
+section for the full story.
 
-Originally created by **Amir Eshaq**, modified by Xander, and further
-modified by me (Kristian "Mist" Cook). See [LICENSE](./LICENSE) — this
-project remains MIT licensed, with the original copyright preserved.
+## Just want to use it?
 
-### What I changed
+Grab the installer from the [Releases page](../../releases) and run it.
+That's it — no terminal, no code.
 
-- Split the app into explicit **host** (Electron, captures the screen) and
-  **viewer** (any browser) roles, fixing a race condition where the original
-  single-component design could stall out waiting for a peer that never
-  showed up.
-- Migrated `robotjs` → [`@hurdlegroup/robotjs`](https://www.npmjs.com/package/@hurdlegroup/robotjs)
-  (a maintained fork with prebuilt Windows binaries), since the original
-  dependency doesn't have prebuilt binaries for modern Node and required a
-  full Visual Studio Build Tools install to compile from source.
-- Removed an unused `@tensorflow/tfjs-node` dependency that also required a
-  native compile step for no functional benefit.
-- Added mobile support:
-  - Touch controls (tap to click, drag to move/drag)
-  - Two-finger scroll and pinch-to-zoom, with a lock toggle so the two
-    gestures don't fight each other
-  - An on-screen keyboard trigger (mobile browsers only show their keyboard
-    for a real focused input, so there's a small input box that summons it)
-  - Accurate touch-to-screen coordinate mapping that accounts for
-    letterboxing when the video's aspect ratio doesn't match the viewport
-- Fixed a signaling bug where the server wasn't relaying `offer`/`viewer-ready`
-  events between host and viewer, which caused the video stream to never
-  attach even though the underlying WebRTC/socket plumbing was healthy.
-- Requested higher-resolution screen capture (was defaulting to a small,
-  blurry capture).
-- Added PIN authentication: viewers must enter a shared PIN before the
-  server will relay any signaling or forward any mouse/keyboard events.
-  The host authenticates itself automatically.
-- Added TURN server support (via [Metered](https://www.metered.ca)) so the
-  video connection can still work over cellular/CGNAT networks, which
-  usually block the direct peer-to-peer connections STUN alone provides.
-  Credentials are fetched fresh from the host's own server (which holds the
-  API key) rather than being hardcoded in the client, so nothing sensitive
-  ends up in the browser or in this repo.
-- Fixed a race condition where the TURN credentials fetch could delay the
-  host long enough to miss Electron's one-shot screen-source message,
-  resulting in a fully-connected session with no video ever showing up.
-- Fixed cursor accuracy near screen edges on displays with Windows DPI
-  scaling other than 100% — the server now asks `robotjs` directly for its
-  own understanding of the screen size instead of trusting Electron's
-  `screen` module, which can disagree with it under scaling.
+**Heads up:** it's unsigned (I'm one guy, not a company with a code-signing
+certificate), so Windows will probably show a "Windows protected your PC"
+warning the first time you run it. Click **"More info" → "Run anyway"**.
+It's safe — you can read every line of the source right here if you want.
 
-## Architecture
+### First-time setup (takes like 2 minutes)
 
-- **Electron main process** (`public/main.js`, compiled to `build/main.js`
-  by `react-scripts build` — **always edit `public/main.js`, never
-  `build/main.js` directly**, since it gets overwritten on every build):
-  runs an Express + Socket.IO server on port `3001`, and uses
-  [`@hurdlegroup/robotjs`](https://www.npmjs.com/package/@hurdlegroup/robotjs)
-  to actually move the mouse / send keystrokes on the host machine.
-- **React app** (`src/App.js`): detects whether it's running inside
-  Electron (`window.electronAPI` present, injected by `public/preload.js`)
-  to decide whether it's the host (captures and broadcasts the screen via
-  WebRTC) or a viewer (renders the incoming stream and sends input events
-  back over the socket).
-- **ngrok**: tunnels the local Express server to a public URL so viewers
-  don't need to be on the same network as the host.
+1. Open the app
+2. Click **Settings**
+3. Fill in:
+   - Your **ngrok domain** (see below if you don't have one yet)
+   - A **PIN** — this is what protects your PC from randoms, pick something
+     you'll remember
+   - A **TURN API key** (optional, but recommended — makes it work on
+     cellular data, not just WiFi. See below)
+4. Hit **Save**, then **Start tunnel**
+5. Scan the QR code with your phone, type in the PIN, and you're in
 
-## Setup
+Everything you type here is saved on your computer automatically — you
+won't have to do this again next time you open the app.
 
-### 1. Install dependencies
+### Getting an ngrok domain (free, 2 minutes)
 
-```powershell
+1. Sign up at [ngrok.com](https://ngrok.com)
+2. In the dashboard, go to **Domains** and grab your free static domain
+   (looks like `something-random.ngrok-free.dev`)
+3. Open a terminal once and run:
+   ```
+   ngrok config add-authtoken YOUR_TOKEN
+   ```
+   (your token is on the ngrok dashboard homepage)
+4. Paste the domain into the app's Settings
+
+You only need ngrok *installed* on your computer — the app launches and
+manages the tunnel for you after that, so no terminal needed going forward.
+
+### Getting a TURN key (free, makes cellular work)
+
+Without this, the app still works great over WiFi, but video usually won't
+connect over cellular data (phone carriers block the direct connection type
+it needs). Takes 5 minutes to fix:
+
+1. Sign up free at [metered.ca](https://www.metered.ca)
+2. Go to **TURN Server** in the sidebar (not "Developers" — that's a
+   different key that won't work here)
+3. Create a credential if you don't have one
+4. Click **"Show API Key"** next to it and paste that into the app's Settings
+
+## Want to build it yourself instead?
+
+```bash
+git clone <this repo>
+cd control_desktop
 yarn install
-```
-
-If you're on Windows and hit native build errors, make sure you're using
-`@hurdlegroup/robotjs`, not the original `robotjs` — the latter has no
-prebuilt binaries for modern Node versions and requires a full C++ build
-toolchain to compile.
-
-### 2. Set up ngrok
-
-Sign up for a free [ngrok](https://ngrok.com) account and grab your
-authtoken from the "Your Authtoken" section of the dashboard (**not** the
-API Keys section — API keys start with `cr_` and won't work here).
-
-```powershell
-ngrok config add-authtoken YOUR_AUTHTOKEN
-```
-
-Free accounts get one permanent static domain ("dev domain") under
-**Domains** in the dashboard. Use it explicitly so the URL never changes:
-
-```powershell
-ngrok http --domain=YOUR-DOMAIN.ngrok-free.dev 3001
-```
-
-### 3. Set your PIN and TURN API key as environment variables
-
-Two secrets are needed at runtime. **Never hardcode either of these in the
-code** — set them as environment variables so they don't end up in the
-(public) repo:
-
-```powershell
-setx REMOTE_PIN "your-secret-pin"
-setx METERED_SECRET_KEY "your-turn-credential-api-key"
-```
-
-`setx` sets these permanently for your Windows user account, but you must
-**open a brand new terminal window** afterward for the new values to be
-picked up — a terminal that was already open when you ran `setx` won't see
-them. Verify with:
-
-```powershell
-echo $env:REMOTE_PIN
-echo $env:METERED_SECRET_KEY
-```
-
-**Where to get the TURN key:** sign up free at
-[metered.ca](https://www.metered.ca), go to the **TURN Server** page (not
-Developers/Secret Key — that's a different, account-level key that won't
-work for this), create a credential if you don't have one, and click
-**"Show API Key"** next to it. That per-credential key is the one that
-goes in `METERED_SECRET_KEY`.
-
-Without a working TURN key, video will still work fine over WiFi, but will
-generally fail to connect over cellular data, since most carriers' NAT
-blocks the direct peer-to-peer connection STUN alone provides.
-
-### 4. Point the app at your domain
-
-Update the hardcoded URL in **two** places to match your ngrok domain:
-
-- `public/main.js` → `mainWindow.loadURL('https://YOUR-DOMAIN.ngrok-free.dev/')`
-- `src/App.js` → `const SIGNALING_URL = 'https://YOUR-DOMAIN.ngrok-free.dev/remote-ctrl'`
-
-(`build/main.js` gets this automatically from `public/main.js` on the next
-build — don't edit it directly.)
-
-### 5. Build and run
-
-```powershell
 yarn build
 yarn start
 ```
 
-**Always run `yarn build` before `yarn start`** — running them out of order
-means Electron loads a stale bundle. Also make sure you're in a terminal
-that was opened *after* you ran the `setx` commands above, or the app will
-silently fall back to the default PIN / no TURN server.
+Everything else (ngrok domain, PIN, TURN key) is set through the Settings
+panel in the running app, same as above — nothing needs to be hardcoded or
+set as an environment variable anymore.
 
-Once it's running, open your ngrok URL on any other device to view and
-control the host's screen. You'll be asked for the PIN before you can see
-or control anything.
+To build your own installer:
+```bash
+yarn make
+```
+Your `.exe` shows up in `out/make/squirrel.windows/x64/`.
 
-## Controls (viewer)
+## How it works, roughly
 
-- **One finger / mouse** — move cursor, click and drag
-- **Two fingers** — scroll (default) or pinch-to-zoom, toggle with the
-  🔒/🔍 button
-- **⌨️ button** — opens a small input to bring up your phone's keyboard;
-  typed characters and Backspace/Enter/Tab/arrows get forwarded to the host
+- The app runs a little local server on your PC (port 3001) that does two
+  things: shares your screen over WebRTC, and listens for mouse/keyboard
+  commands to actually move your cursor and type.
+- ngrok makes that local server reachable from the internet, so your phone
+  can talk to it from anywhere — coffee shop, cellular data, wherever.
+- Your phone connects to the WebRTC stream directly-ish (through a TURN
+  relay if needed) so video stays fast, while control commands and the
+  handshake to set that up route through ngrok.
+- Everything's gated behind a PIN so randomly guessing your ngrok URL
+  doesn't get anyone in.
 
-## Known limitations / possible next steps
+## Controls on the viewer (phone) side
 
-- Only tested with a single viewer at a time.
-- Free ngrok domains can only be used from one machine at a time (whichever
-  is currently running `ngrok http --domain=...`).
-- The host machine must stay awake (not sleep) for any of this to work —
-  Windows sleep pauses the Electron app, the Express server, and the ngrok
-  tunnel all at once. If you want to check in on the host while away from
-  it, set its power plan to never sleep while plugged in.
-- No mouse-look/relative-mouse mode — clicks and drags map to absolute
-  screen coordinates, which works well for normal desktop use but isn't
-  quite right for FPS-style camera control in games.
+- **One finger** — move the cursor, tap to click, drag to drag
+- **Two fingers** — scroll by default; tap the 🔒/🔍 button to switch to
+  pinch-to-zoom instead
+- **⌨️ button** — pops up a little box so your phone's keyboard shows up;
+  whatever you type gets sent over
+
+## Things to know
+
+- Only really tested with one viewer connected at a time.
+- Your computer needs to stay **awake**, not sleeping, for this to work.
+  If you want to check on it while you're out, go into Windows power
+  settings and turn off sleep while plugged in.
+- Mouse movement is 1:1 with screen position (great for normal desktop
+  use, not built for FPS-style camera-look controls in games).
+- Free ngrok domains only work from one computer at a time — if you're
+  running this on two machines, only whichever one has the tunnel started
+  will actually be reachable.
+
+## Credits
+
+This started as a project by **Amir Eshaq**, which my friend Xander
+modified, and I rebuilt a lot of on top of that (see the license file for
+the original copyright — this is still MIT licensed).
+
+Rough list of what changed under the hood, if you're curious or building
+on this yourself:
+
+- Rewrote the host/viewer connection logic to fix a race condition where
+  the app could get stuck waiting for a peer that never showed up
+- Swapped in a maintained fork of `robotjs` so the app doesn't need a full
+  C++ compiler installed just to run
+- Added real mobile support — touch controls, pinch-zoom, an on-screen
+  keyboard trigger, and coordinate mapping that actually lines up taps
+  with where they land on screen
+- Added PIN authentication
+- Added TURN relay support so it works on cellular, not just WiFi
+- Replaced editing code / setting environment variables with an actual
+  Settings screen in the app, plus a QR code so you don't have to type
+  URLs on your phone
+- Made ngrok launch automatically from inside the app instead of needing
+  a separate terminal window running the whole time
+- Packaged the whole thing into a real Windows installer
